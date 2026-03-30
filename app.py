@@ -12,7 +12,7 @@ import streamlit as st
 from raport_kasowy import (
     RaportKasowy,
     KasaRecord,
-    parse_jpk_fa,
+    parse_xml_faktura,
     parse_bank_pdf,
     process_payroll,
 )
@@ -207,6 +207,15 @@ with st.sidebar:
     okres_str = f"{rok}-{miesiac:02d}"
 
     st.divider()
+    st.markdown("### 📂 Faktury – tryb importu")
+    only_cash = st.toggle(
+        "Tylko gotówkowe",
+        value=True,
+        help="Włącz = tylko faktury z formą płatności 'gotówka'. "
+             "Wyłącz = importuj WSZYSTKIE faktury z pliku.",
+    )
+
+    st.divider()
     st.markdown("### 👥 Lista płac – tryb")
     collective = st.toggle(
         "Zbiorczy dokument KW",
@@ -235,7 +244,7 @@ st.markdown("""
 
 
 # ── Krok 1 – JPK_FA ──────────────────────────────────────────────────────────
-st.markdown('<div class="step-box">📂 Krok 1: Wgraj JPK_FA (XML) – faktury opłacone gotówką → KP</div>',
+st.markdown('<div class="step-box">📂 Krok 1: Wgraj plik faktur (JPK_FA lub KSeF XML) → KP</div>',
             unsafe_allow_html=True)
 
 c1, c2 = st.columns([3, 2])
@@ -247,7 +256,7 @@ with c2:
         st.markdown('<div class="info-box">📄 Plik wczytany – kliknij „Przetwórz źródła"</div>',
                     unsafe_allow_html=True)
     else:
-        st.markdown('<div class="info-box">💡 Obsługiwane: JPK_FA v3 i v4 (XML)</div>',
+        st.markdown('<div class="info-box">💡 Obsługiwane: JPK_FA (v1–v4) oraz KSeF e-faktura (XML)</div>',
                     unsafe_allow_html=True)
 
 
@@ -321,18 +330,30 @@ if process:
     errors  = []
     summary = []
 
-    # JPK_FA
+    # JPK_FA / KSeF
     if jpk_file:
         try:
             with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as tmp:
                 tmp.write(jpk_file.read())
                 tmp_path = tmp.name
-            recs = parse_jpk_fa(tmp_path)
+            recs, diag, fmt = parse_xml_faktura(tmp_path, only_cash=only_cash)
             for r in recs:
                 raport.dodaj_rekord(r)
-            summary.append(f"✅ JPK_FA: **{len(recs)}** faktur gotówkowych")
+            fmt_label = "KSeF" if fmt == "ksef" else "JPK_FA"
+            if only_cash:
+                msg = (f"✅ {fmt_label}: **{diag['cash']}** faktur gotówkowych "
+                       f"(pominięto {diag['skipped']} innych form płatności)")
+            else:
+                msg = f"✅ {fmt_label}: **{diag['cash']}** faktur (tryb: wszystkie)"
+            summary.append(msg)
+            if only_cash and diag['cash'] == 0 and diag['total'] > 0:
+                st.warning(
+                    f"⚠️ Znaleziono {diag['total']} faktur, ale żadna nie ma "
+                    f"formy płatności 'gotówka'. Wyłącz opcję **Tylko gotówkowe** "
+                    f"w panelu bocznym, aby zaimportować wszystkie faktury."
+                )
         except Exception as e:
-            errors.append(f"JPK_FA: {e}")
+            errors.append(f"Plik XML: {e}")
 
     # Wyciąg
     if bank_file:
