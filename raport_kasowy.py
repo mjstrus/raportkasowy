@@ -66,6 +66,20 @@ _FONTS_OK = _register_fonts()
 _F        = "DejaVu"      if _FONTS_OK else "Helvetica"
 _F_BOLD   = "DejaVu-Bold" if _FONTS_OK else "Helvetica-Bold"
 
+# Ustaw globalny domyślny font ReportLab na DejaVu
+if _FONTS_OK:
+    from reportlab.lib.styles import getSampleStyleSheet as _gss
+    from reportlab.rl_config import canvas_basefontname
+    import reportlab.rl_config as _rlc
+    _rlc.canvas_basefontname = _F
+    # Nadpisz domyślne style raz na poziomie modułu
+    _base_styles = _gss()
+    for _s in _base_styles.byName.values():
+        if hasattr(_s, "fontName") and "Helvetica" in (_s.fontName or ""):
+            _s.fontName = _F
+        if hasattr(_s, "bulletFontName") and "Helvetica" in (getattr(_s, "bulletFontName", "") or ""):
+            _s.bulletFontName = _F
+
 DocType = Literal["KP", "KW"]
 
 
@@ -735,16 +749,19 @@ class RaportKasowy:
             topMargin=2*cm, bottomMargin=2*cm,
         )
 
-        styles      = getSampleStyleSheet()
+        styles = getSampleStyleSheet()
+
         title_style = ParagraphStyle(
-            "title", parent=styles["Title"],
+            "rk_title",
             fontName=_F_BOLD, fontSize=14,
             textColor=colors.HexColor("#1a237e"), spaceAfter=4,
+            leading=18,
         )
         sub_style = ParagraphStyle(
-            "sub", parent=styles["Normal"],
+            "rk_sub",
             fontName=_F, fontSize=9,
             textColor=colors.gray, spaceAfter=10,
+            leading=12,
         )
 
         story   = []
@@ -782,6 +799,7 @@ class RaportKasowy:
             ("BACKGROUND",  (0, 0),     (-1, 0),     colors.HexColor("#1a237e")),
             ("TEXTCOLOR",   (0, 0),     (-1, 0),     colors.white),
             ("FONTNAME",    (0, 0),     (-1, 0),     _F_BOLD),
+            ("FONTNAME",    (0, 1),     (-1, n-4),   _F),        # wiersze danych
             ("FONTSIZE",    (0, 0),     (-1, n-4),   8),
             ("VALIGN",      (0, 0),     (-1, -1),    "MIDDLE"),
             ("ALIGN",       (0, 0),     (-1, 0),     "CENTER"),
