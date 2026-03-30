@@ -388,41 +388,63 @@ def parse_xml_faktura(
 # Parser wyciągu bankowego (PDF)
 # ============================================================================
 
-# Operacje kasowe – wpłata/wypłata gotówkowa lub przelew wewnętrzny
-_WB_OPERACJE = re.compile(
-    r"wypłat[a-z]*\s+(?:w\s+)?bankomat[a-z]*"
-    r"|wpłat[a-z]*\s+(?:w\s+|do\s+)?bankomat[a-z]*"
+# ---------------------------------------------------------------------------
+# Santander (i inne banki) format linia transakcji:
+#   DATA1 DATA2 OPIS_TRANSAKCJI  KWOTA  SALDO
+#   np. "2026-02-26 2026-02-26 UZNANIE Przelew pomiędzy swoimi rachunkami 1.000,00 3.225,19"
+#
+# Logika kierunku:
+#   "UZNANIE" w opisie → kwota wpłynęła na konto (credit) → gotówka WYSZŁA z kasy → KW
+#   brak "UZNANIE"     → kwota opuściła konto  (debet)  → gotówka WESZŁA do kasy → KP
+# ---------------------------------------------------------------------------
+
+# Regex dopasowujący linię transakcji bankowej
+# Grupy: (1) data, (2) opis, (3) kwota, (4) saldo
+_WB_TX_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2})\s+\d{4}-\d{2}-\d{2}\s+(.+?)\s+"
+    r"([\d.]+,\d{2})\s+([\d.]+,\d{2})\s*$"
+)
+
+# Alternatywny format daty DD.MM.YYYY
+_WB_TX_RE2 = re.compile(
+    r"^(\d{2}\.\d{2}\.\d{4})\s+\d{2}\.\d{2}\.\d{4}\s+(.+?)\s+"
+    r"([\d.]+,\d{2})\s+([\d.]+,\d{2})\s*$"
+)
+
+# Operacje kasowe – jedyne które trafiają do raportu
+_WB_CASH_RE = re.compile(
+    r"wypłat[a-z]*\s+(?:w\s+|z\s+)?bankomat"
+    r"|wpłat[a-z]*\s+(?:w\s+|do\s+)?bankomat"
     r"|ATM\s+(?:withdrawal|deposit|cash)"
-    r"|transakcja\s+wewnętrzn[a-z]*"
-    r"|przelew\s+wewnętrzn[a-z]*"
-    r"|przelew\s+własn[a-z]*"
-    r"|przelew\s+między\s+kontami"
+    r"|transakcja\s+wewnętrzn"
+    r"|przelew\s+wewnętrzn"
+    r"|przelew\s+własn"
+    r"|przelew\s+między\s+(?:swoimi\s+)?(?:kontami|rachunkami)"
+    r"|przelew\s+pomiędzy\s+(?:swoimi\s+)?(?:kontami|rachunkami)"
     r"|operacja\s+między\s+kontami"
-    r"|przelew\s+wł\.",
+    r"|uznanie\s+przelew\s+pomiędzy",
     re.IGNORECASE | re.UNICODE,
 )
 
-# Opis przyjazny dla użytkownika (wyodrębniony z linii)
-_WB_OPIS = {
-    "wypłata.*bankomat":          "Wypłata z bankomatu",
-    "wpłata.*bankomat":           "Wpłata do bankomatu",
-    "ATM.*withdrawal":            "Wypłata z bankomatu",
-    "ATM.*deposit":               "Wpłata do bankomatu",
-    "transakcja.*wewnętrzn":      "Transakcja wewnętrzna",
-    "przelew.*wewnętrzn":         "Przelew wewnętrzny",
-    "przelew.*własn|przelew.*wł": "Przelew własny",
-    "przelew.*między.*kontami":   "Przelew między kontami",
-    "operacja.*między.*kontami":  "Operacja między kontami",
-}
+# Czytelne opisy
+_WB_OPIS_MAP = [
+    (re.compile(r"wypłat.{0,10}bankomat",         re.I), "Wypłata z bankomatu"),
+    (re.compile(r"wpłat.{0,10}bankomat",          re.I), "Wpłata do bankomatu"),
+    (re.compile(r"ATM.{0,5}withdrawal",           re.I), "Wypłata z bankomatu"),
+    (re.compile(r"ATM.{0,5}deposit",              re.I), "Wpłata do bankomatu"),
+    (re.compile(r"transakcja\s+wewnętrzn",        re.I), "Transakcja wewnętrzna"),
+    (re.compile(r"przelew\s+wewnętrzn",           re.I), "Przelew wewnętrzny"),
+    (re.compile(r"przelew\s+własn",               re.I), "Przelew własny"),
+    (re.compile(r"przelew.{0,10}między.{0,10}kontami",   re.I), "Przelew między kontami"),
+    (re.compile(r"przelew.{0,10}pomiędzy.{0,15}rachunkami", re.I | re.U), "Przelew między rachunkami"),
+    (re.compile(r"operacja.{0,10}między",         re.I), "Operacja między kontami"),
+]
 
-_DATE_RE   = re.compile(r"\b(\d{4}[-/]\d{2}[-/]\d{2}|\d{2}[./]\d{2}[./]\d{4})\b")
-# Kwota z opcjonalnym minusem/plusem przed lub po
-_AMOUNT_RE = re.compile(r"([+-]?\s*\d[\d\s]*[,.]?\d{0,2})\s*(?:PLN|zł)?", re.IGNORECASE)
-_SIGN_RE   = re.compile(r"(?:^|[\s;,])([+-])\s*[\d]")
+_DATE_PARSE_FMTS = ("%Y-%m-%d", "%d.%m.%Y", "%Y/%m/%d", "%d/%m/%Y")
 
 
-def _parse_date(txt: str) -> Optional[date]:
-    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d.%m.%Y", "%d/%m/%Y"):
+def _parse_wb_date(txt: str) -> Optional[date]:
+    for fmt in _DATE_PARSE_FMTS:
         try:
             return datetime.strptime(txt.strip(), fmt).date()
         except ValueError:
@@ -430,44 +452,21 @@ def _parse_date(txt: str) -> Optional[date]:
     return None
 
 
-def _parse_signed_amount(line: str) -> tuple[Decimal, Optional[str]]:
-    """
-    Zwraca (|kwota|, znak) gdzie znak = '+' / '-' / None.
-    Kwota ujemna (debet, wypłata z konta) → KP (gotówka wchodzi do kasy).
-    Kwota dodatnia (credit, wpłata na konto) → KW (gotówka wychodzi z kasy).
-    """
-    amt_match = _AMOUNT_RE.search(line)
-    if not amt_match:
-        return Decimal("0"), None
-
-    raw = amt_match.group(1).replace(" ", "")
-    sign = None
-    if raw.startswith("-"):
-        sign = "-"
-        raw = raw[1:]
-    elif raw.startswith("+"):
-        sign = "+"
-        raw = raw[1:]
-    else:
-        # sprawdź czy przed kwotą jest jawny znak
-        s = _SIGN_RE.search(line[:amt_match.start() + 5])
-        if s:
-            sign = s.group(1)
-
+def _parse_wb_amount(txt: str) -> Decimal:
+    """Parsuje polską kwotę: 1.000,20 → Decimal('1000.20')"""
+    # usuń separatory tysięcy (kropki), zamień przecinek dziesiętny na kropkę
+    clean = txt.replace(".", "").replace(",", ".")
     try:
-        kwota = abs(Decimal(raw.replace(",", ".")))
+        return abs(Decimal(clean))
     except InvalidOperation:
-        kwota = Decimal("0")
-
-    return kwota, sign
+        return Decimal("0")
 
 
-def _opis_operacji(context: str) -> str:
-    """Zwraca przyjazny opis operacji bankowej."""
-    for pattern, opis in _WB_OPIS.items():
-        if re.search(pattern, context, re.IGNORECASE | re.UNICODE):
-            return opis
-    return "Operacja kasowa"
+def _opis_wb(opis: str) -> str:
+    for pattern, label in _WB_OPIS_MAP:
+        if pattern.search(opis):
+            return label
+    return opis[:60]
 
 
 def parse_bank_pdf(
@@ -475,15 +474,16 @@ def parse_bank_pdf(
     nr_prefix: str = "BNK",
 ) -> list[KasaRecord]:
     """
-    Przetwarza wyciąg bankowy (PDF).
+    Przetwarza wyciąg bankowy (PDF) – format Santander i podobne.
 
-    Obsługiwane opisy operacji:
-      wypłata/wpłata w bankomacie, transakcja wewnętrzna,
-      przelew wewnętrzny/własny/między kontami, operacja między kontami
+    Obsługuje operacje kasowe:
+      - Wypłata/wpłata w bankomacie
+      - Transakcja wewnętrzna
+      - Przelew wewnętrzny / własny / między kontami / pomiędzy rachunkami
 
-    Logika znaku:
-      kwota ujemna (debet)  → KP  (pieniądze opuściły konto → zasiliły kasę)
-      kwota dodatnia (credit) → KW  (pieniądze wróciły na konto → wyszły z kasy)
+    Logika KP/KW:
+      OBCIĄŻENIA (brak słowa UZNANIE) → KP  (gotówka zasila kasę)
+      UZNANIA    (słowo UZNANIE w opisie) → KW  (gotówka opuszcza kasę)
     """
     records: list[KasaRecord] = []
 
@@ -492,48 +492,31 @@ def parse_bank_pdf(
             text = page.extract_text() or ""
             lines = text.splitlines()
 
-            for i, line in enumerate(lines):
-                date_match = _DATE_RE.search(line)
-                if not date_match:
+            for line in lines:
+                # Dopasuj format linii transakcji
+                m = _WB_TX_RE.match(line.strip()) or _WB_TX_RE2.match(line.strip())
+                if not m:
                     continue
-                dok_date = _parse_date(date_match.group())
+
+                date_txt, opis_raw, kwota_txt, _ = m.group(1), m.group(2), m.group(3), m.group(4)
+
+                # Czy to operacja kasowa?
+                if not _WB_CASH_RE.search(opis_raw):
+                    continue
+
+                dok_date = _parse_wb_date(date_txt)
                 if not dok_date:
                     continue
 
-                # kontekst: bieżąca linia + poprzednia + następna
-                prev_line = lines[i - 1] if i > 0 else ""
-                next_line = lines[i + 1] if i + 1 < len(lines) else ""
-                context   = prev_line + " " + line + " " + next_line
+                kwota = _parse_wb_amount(kwota_txt)
 
-                if not _WB_OPERACJE.search(context):
-                    continue
-
-                kwota, sign = _parse_signed_amount(line)
-
-                # Gdy brak jawnego znaku – próbuj z kontekstu
-                if sign is None:
-                    kwota2, sign2 = _parse_signed_amount(context)
-                    if sign2:
-                        sign = sign2
-                        if kwota == Decimal("0"):
-                            kwota = kwota2
-
-                # Kierunek: debet (ujemny) → KP, credit (dodatni) → KW
-                # Gdy brak znaku – rozstrzygnij po słowie kluczowym
-                if sign == "-":
-                    typ: DocType = "KP"
-                elif sign == "+":
-                    typ = "KW"
-                elif re.search(r"wypłat[a-z]*\s+(?:w\s+)?bankomat", context, re.I):
-                    typ = "KP"
-                elif re.search(r"wpłat[a-z]*\s+(?:w\s+|do\s+)?bankomat", context, re.I):
-                    typ = "KW"
-                else:
-                    typ = "KP"  # domyślnie KP gdy brak znaku
+                # Kierunek: UZNANIE = wpływ na konto = gotówka WYSZŁA z kasy = KW
+                is_uznanie = bool(re.match(r"uznanie", opis_raw.strip(), re.I))
+                typ: DocType = "KW" if is_uznanie else "KP"
 
                 seq   = len(records) + 1
                 numer = f"{nr_prefix}/{dok_date.strftime('%Y%m')}/{seq:03d}"
-                opis  = _opis_operacji(context)
+                opis  = _opis_wb(opis_raw)
 
                 records.append(KasaRecord(
                     data=dok_date,
