@@ -175,6 +175,8 @@ if "payroll_rows" not in st.session_state:
     st.session_state.payroll_rows = [{"nazwisko": "", "kwota": "", "typ_wyplaty": "wynagrodzenie"}]
 if "raport_okres" not in st.session_state:
     st.session_state.raport_okres = ""
+if "saldo_poprzednie" not in st.session_state:
+    st.session_state.saldo_poprzednie = Decimal("0")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -216,6 +218,20 @@ with st.sidebar:
     nazwa_firmy = st.text_input("Nazwa firmy", value=_default_nazwa,
                                  placeholder="np. XYZ Sp. z o.o.",
                                  help="Uzupełniana automatycznie po wyszukaniu NIP")
+
+    st.divider()
+    st.markdown("### 💵 Saldo kasy")
+    saldo_poprzednie_str = st.text_input(
+        "Saldo końcowe poprzedniego miesiąca (PLN)",
+        value="0,00",
+        placeholder="0,00",
+        help="Wpisz saldo końcowe kasy z poprzedniego miesiąca – "
+             "staje się saldem początkowym bieżącego okresu.",
+    )
+    try:
+        saldo_poprzednie = abs(Decimal(saldo_poprzednie_str.replace(" ", "").replace(",", ".")))
+    except Exception:
+        saldo_poprzednie = Decimal("0")
 
     st.divider()
     st.markdown("### 📅 Okres raportu")
@@ -464,8 +480,9 @@ if process:
     if not raport._records:
         st.warning("⚠️ Brak danych – wgraj co najmniej jedno źródło danych.")
     else:
-        st.session_state.records      = raport._prepare()
-        st.session_state.raport_okres = okres_str
+        st.session_state.records           = raport._prepare()
+        st.session_state.raport_okres      = okres_str
+        st.session_state.saldo_poprzednie  = saldo_poprzednie
         st.rerun()
 
 
@@ -477,35 +494,46 @@ if st.session_state.records:
     st.markdown('<div class="step-box">📊 Podgląd i pobieranie raportu</div>',
                 unsafe_allow_html=True)
 
-    total_kp = sum(r.kwota for r in records if r.typ == "KP")
-    total_kw = sum(r.kwota for r in records if r.typ == "KW")
-    saldo    = total_kp - total_kw
-    n_kp     = sum(1 for r in records if r.typ == "KP")
-    n_kw     = sum(1 for r in records if r.typ == "KW")
+    total_kp       = sum(r.kwota for r in records if r.typ == "KP")
+    total_kw       = sum(r.kwota for r in records if r.typ == "KW")
+    saldo_pocz     = st.session_state.saldo_poprzednie
+    saldo_konc     = saldo_pocz + total_kp - total_kw
+    n_kp           = sum(1 for r in records if r.typ == "KP")
+    n_kw           = sum(1 for r in records if r.typ == "KW")
 
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
     with m1:
         st.markdown(
-            f'<div class="metric-kp">📥 Przychody KP<br>'
-            f'<span style="font-size:1.25rem">{fmt_pln(total_kp)}</span><br>'
-            f'<small>{n_kp} dokumentów</small></div>', unsafe_allow_html=True)
+            f'<div class="metric-saldo">🏦 Saldo początkowe<br>'
+            f'<span style="font-size:1.1rem">{fmt_pln(saldo_pocz)}</span><br>'
+            f'<small>stan na początek okresu</small></div>', unsafe_allow_html=True)
     with m2:
         st.markdown(
-            f'<div class="metric-kw">📤 Rozchody KW<br>'
-            f'<span style="font-size:1.25rem">{fmt_pln(total_kw)}</span><br>'
-            f'<small>{n_kw} dokumentów</small></div>', unsafe_allow_html=True)
+            f'<div class="metric-kp">📥 Przychody KP<br>'
+            f'<span style="font-size:1.1rem">{fmt_pln(total_kp)}</span><br>'
+            f'<small>{n_kp} dokumentów</small></div>', unsafe_allow_html=True)
     with m3:
-        kolor = "#1b5e20" if saldo >= 0 else "#b71c1c"
         st.markdown(
-            f'<div class="metric-saldo">💰 Saldo kasy<br>'
-            f'<span style="font-size:1.25rem;color:{kolor}">{fmt_pln(saldo)}</span><br>'
-            f'<small>Okres: {st.session_state.raport_okres}</small></div>',
-            unsafe_allow_html=True)
+            f'<div class="metric-kw">📤 Rozchody KW<br>'
+            f'<span style="font-size:1.1rem">{fmt_pln(total_kw)}</span><br>'
+            f'<small>{n_kw} dokumentów</small></div>', unsafe_allow_html=True)
     with m4:
+        kolor_konc = "#1b5e20" if saldo_konc >= 0 else "#b71c1c"
+        st.markdown(
+            f'<div class="metric-saldo">💰 Saldo końcowe<br>'
+            f'<span style="font-size:1.1rem;color:{kolor_konc}">{fmt_pln(saldo_konc)}</span><br>'
+            f'<small>stan na koniec okresu</small></div>', unsafe_allow_html=True)
+    with m5:
         st.markdown(
             f'<div class="metric-saldo">📋 Łącznie<br>'
-            f'<span style="font-size:1.25rem">{len(records)}</span><br>'
+            f'<span style="font-size:1.1rem">{len(records)}</span><br>'
             f'<small>dokumentów kasowych</small></div>', unsafe_allow_html=True)
+    with m6:
+        st.markdown(
+            f'<div class="info-box" style="padding:0.8rem">'
+            f'<strong>Okres:</strong> {st.session_state.raport_okres}<br>'
+            f'<strong>Następny mies.:</strong><br>saldo pocz. = {fmt_pln(saldo_konc)}</div>',
+            unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -526,7 +554,11 @@ if st.session_state.records:
     )
 
     raport_dl = RaportKasowy(okres=st.session_state.raport_okres)
-    raport_dl._records = list(records)
+    raport_dl._records      = list(records)
+    raport_dl.saldo_pocz    = st.session_state.saldo_poprzednie
+    raport_dl.saldo_konc    = (st.session_state.saldo_poprzednie
+                               + sum(r.kwota for r in records if r.typ == "KP")
+                               - sum(r.kwota for r in records if r.typ == "KW"))
 
     st.markdown("<br>", unsafe_allow_html=True)
     dl1, dl2, dl3 = st.columns([3, 3, 1])
