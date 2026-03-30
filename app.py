@@ -208,9 +208,12 @@ with st.sidebar:
 
     st.divider()
     st.markdown("### 📅 Okres raportu")
-    rok     = st.selectbox("Rok",    list(range(2023, 2027))[::-1], index=1)
-    miesiac = st.selectbox("Miesiąc", list(range(1, 13)),
-                           format_func=lambda m: datetime(2000, m, 1).strftime("%B"),
+    rok     = st.selectbox("Rok",    list(range(2023, 2027))[::-1], index=1, help="Rok obrachunkowy")
+    miesiac = st.selectbox("Miesiąc", list(range(1, 13)), help="Miesiąc obrachunkowy",
+                           format_func=lambda m: [
+                               "styczeń","luty","marzec","kwiecień","maj","czerwiec",
+                               "lipiec","sierpień","wrzesień","październik","listopad","grudzień"
+                           ][m-1],
                            index=datetime.now().month - 1)
     okres_str = f"{rok}-{miesiac:02d}"
 
@@ -219,8 +222,8 @@ with st.sidebar:
     only_cash = st.toggle(
         "Tylko gotówkowe",
         value=True,
-        help="Włącz = tylko faktury z formą płatności 'gotówka'. "
-             "Wyłącz = importuj WSZYSTKIE faktury z pliku.",
+        help="Włączone: importuje tylko faktury z formą płatności 'gotówka'. "
+             "Wyłączone: importuje wszystkie faktury z pliku (przydatne dla JPK_FA z Saldeo).",
     )
 
     st.divider()
@@ -228,7 +231,8 @@ with st.sidebar:
     collective = st.toggle(
         "Zbiorczy dokument KW",
         value=False,
-        help="Włącz = jeden dokument KW dla całej listy płac",
+        help="Włączone: jeden dokument KW dla całej listy płac. "
+             "Wyłączone: osobny dokument KW dla każdego pracownika.",
     )
 
     st.divider()
@@ -363,22 +367,35 @@ if process:
             fmt_label = "KSeF" if fmt == "ksef" else "JPK_FA"
 
             # JPK_FA nie zawiera pola FormaPlatnosci (oficjalny schemat MF).
-            # Zakładamy że księgowy wcześniej przefiltrował faktury gotówkowe
-            # w Saldeo – importujemy wszystkie jako KP.
+            # Księgowy filtruje gotówkowe w Saldeo przed eksportem – importujemy
+            # wszystkie faktury z pliku. Kierunek KP/KW wyznaczany przez NIP firmy:
+            #   firma = sprzedawca → KP,  firma = nabywca → KW
             if fmt == "jpk_fa" and not diag.get("has_forma_platnosci", True):
-                recs2, diag2, _ = parse_xml_faktura(tmp_path, only_cash=False)
+                recs2, diag2, _ = parse_xml_faktura(
+                    tmp_path, only_cash=False, firma_nip=_nip_clean(nip_firmy)
+                )
+                n_kp = sum(1 for r in recs2 if r.typ == "KP")
+                n_kw = sum(1 for r in recs2 if r.typ == "KW")
                 for r in recs2:
                     raport.dodaj_rekord(r)
                 summary.append(
-                    f"✅ {fmt_label}: **{diag2['total']}** faktur → KP "
-                    f"_(JPK_FA bez pola formy płatności – przyjęto wszystkie jako gotówkowe)_"
+                    f"✅ {fmt_label}: **{diag2['total']}** faktur gotówkowych "
+                    f"(KP: {n_kp}, KW: {n_kw})"
                 )
+                if not _nip_clean(nip_firmy):
+                    st.warning(
+                        "⚠️ Nie podano NIP firmy w sidebarze – kierunek KP/KW może być "
+                        "nieprawidłowy. Uzupełnij pole **NIP firmy** i przetwórz ponownie."
+                    )
             else:
                 for r in recs:
                     raport.dodaj_rekord(r)
                 if only_cash:
+                    n_kp = sum(1 for r in recs if r.typ == "KP")
+                    n_kw = sum(1 for r in recs if r.typ == "KW")
                     msg = (f"✅ {fmt_label}: **{diag['cash']}** faktur gotówkowych "
-                           f"(pominięto {diag['skipped']} innych form płatności)")
+                           f"(KP: {n_kp}, KW: {n_kw}, "
+                           f"pominięto: {diag['skipped']})")
                 else:
                     msg = f"✅ {fmt_label}: **{diag['total']}** faktur (tryb: wszystkie)"
                 summary.append(msg)
@@ -387,6 +404,11 @@ if process:
                         f"⚠️ Znaleziono {diag['total']} faktur, ale żadna nie ma "
                         f"formy płatności 'gotówka'. Wyłącz opcję **Tylko gotówkowe** "
                         f"w panelu bocznym, aby zaimportować wszystkie faktury."
+                    )
+                if not _nip_clean(nip_firmy):
+                    st.warning(
+                        "⚠️ Nie podano NIP firmy w sidebarze – kierunek KP/KW może być "
+                        "nieprawidłowy. Uzupełnij pole **NIP firmy** i przetwórz ponownie."
                     )
         except Exception as e:
             errors.append(f"Plik XML: {e}")
