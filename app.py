@@ -91,6 +91,52 @@ html, body, [class*="css"] { font-family: 'Segoe UI', sans-serif; }
     font-size: 0.82rem; color: #0d47a1; margin-bottom: 0.5rem;
 }
 
+/* ── Polskie tłumaczenie file uploadera ── */
+
+/* "Drag and drop files here" */
+[data-testid="stFileUploaderDropzoneInstructions"] div span {
+    visibility: hidden;
+    font-size: 0;
+}
+[data-testid="stFileUploaderDropzoneInstructions"] div span::after {
+    content: "Przeciągnij i upuść pliki tutaj";
+    visibility: visible;
+    font-size: 1rem;
+}
+
+/* "Limit 200MB per file • PDF, DOCX" itp. */
+[data-testid="stFileUploaderDropzoneInstructions"] div small {
+    visibility: hidden;
+    font-size: 0;
+}
+[data-testid="stFileUploaderDropzoneInstructions"] div small::after {
+    content: "Limit 200MB na plik";
+    visibility: visible;
+    font-size: 0.8rem;
+    color: #666;
+}
+
+/* Przycisk "Browse files" */
+[data-testid="stFileUploaderDropzone"] button {
+    font-size: 0 !important;
+}
+[data-testid="stFileUploaderDropzone"] button::after {
+    content: "Przeglądaj pliki";
+    font-size: 0.9rem;
+}
+
+/* Komunikat po wgraniu: "Drag and drop file here" (singular) */
+[data-testid="stFileUploader"] section div small {
+    visibility: hidden;
+    font-size: 0;
+}
+[data-testid="stFileUploader"] section div small::after {
+    content: "Limit 200MB na plik";
+    visibility: visible;
+    font-size: 0.8rem;
+    color: #666;
+}
+
 /* Przyciski pobierania */
 .stDownloadButton > button {
     background: linear-gradient(135deg, #1e3a5f, #2e6da4) !important;
