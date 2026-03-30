@@ -1,0 +1,2 @@
+# raportkasowy
+Generuje raporty kasowe 
