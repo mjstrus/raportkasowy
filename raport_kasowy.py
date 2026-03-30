@@ -673,8 +673,10 @@ def process_payroll(
 
 class RaportKasowy:
     def __init__(self, okres: str = ""):
-        self.okres = okres
-        self._records: list[KasaRecord] = []
+        self.okres      = okres
+        self._records:  list[KasaRecord] = []
+        self.saldo_pocz: Decimal = Decimal("0")   # saldo początkowe (= konc. poprzedniego)
+        self.saldo_konc: Decimal = Decimal("0")   # wyliczane przy eksporcie
 
     def dodaj_rekord(self, record: KasaRecord) -> "RaportKasowy":
         self._records.append(record)
@@ -690,12 +692,15 @@ class RaportKasowy:
                 f"{r.typ}/{counters[r.typ]:03d}"
                 f"/{r.data.strftime('%m')}/{r.data.strftime('%Y')}"
             )
+        total_kp = sum(r.kwota for r in sorted_records if r.typ == "KP")
+        total_kw = sum(r.kwota for r in sorted_records if r.typ == "KW")
+        self.saldo_konc = self.saldo_pocz + total_kp - total_kw
         return sorted_records
 
     # -- eksport XLSX -----------------------------------------------------------
 
     def eksportuj_xlsx(self, sciezka: str | Path) -> Path:
-        records = self._prepare()
+        records  = self._prepare()
         wb = Workbook()
         ws = wb.active
         ws.title = "RaportKasowy"
@@ -732,6 +737,43 @@ class RaportKasowy:
                 kwota_cell.number_format  = '#,##0.00_-'
             except Exception:
                 pass
+
+        # Wiersz saldo początkowe (przed danymi) – pusty Lp, typ "SP"
+        ws.insert_rows(1)
+        saldo_pocz_row = ["", "", "SP", "Saldo początkowe", "", "", ""]
+        ws.cell(row=1, column=1).value = ""
+        ws.cell(row=1, column=2).value = ""
+        ws.cell(row=1, column=3).value = "SP"
+        ws.cell(row=1, column=4).value = "Saldo początkowe"
+        ws.cell(row=1, column=5).value = ""
+        ws.cell(row=1, column=6).value = ""
+        ws.cell(row=1, column=7).value = float(self.saldo_pocz)
+        fill_sp = PatternFill("solid", start_color="E8EAF6")
+        font_sp = Font(name="Arial", size=10, bold=True)
+        for col in range(1, 8):
+            c = ws.cell(row=1, column=col)
+            c.fill   = fill_sp
+            c.font   = font_sp
+            c.border = border
+        ws.cell(row=1, column=3).alignment = align_center
+        ws.cell(row=1, column=7).alignment = align_right
+        ws.cell(row=1, column=7).number_format = '#,##0.00_-'
+
+        # Wiersz saldo końcowe (po danych)
+        last = ws.max_row + 1
+        ws.cell(row=last, column=3).value = "SK"
+        ws.cell(row=last, column=4).value = "Saldo końcowe"
+        ws.cell(row=last, column=7).value = float(self.saldo_konc)
+        fill_sk = PatternFill("solid", start_color="E8EAF6")
+        font_sk = Font(name="Arial", size=10, bold=True)
+        for col in range(1, 8):
+            c = ws.cell(row=last, column=col)
+            c.fill   = fill_sk
+            c.font   = font_sk
+            c.border = border
+        ws.cell(row=last, column=3).alignment = align_center
+        ws.cell(row=last, column=7).alignment = align_right
+        ws.cell(row=last, column=7).number_format = '#,##0.00_-'
 
         out = Path(sciezka)
         wb.save(out)
@@ -775,9 +817,13 @@ class RaportKasowy:
         headers         = ["Lp.", "Data", "Typ", "Nr dokumentu", "Kontrahent", "NIP", "Kwota (PLN)"]
         col_widths_pdf  = [1.2*cm, 2.5*cm, 1.2*cm, 4.5*cm, 9*cm, 3*cm, 3*cm]
 
-        data_table = [headers]
-        total_kp   = Decimal("0")
-        total_kw   = Decimal("0")
+        # Wiersz saldo początkowe
+        data_table = [
+            headers,
+            ["", "", "SP", "Saldo początkowe", "", "", _fmt_dec(self.saldo_pocz)],
+        ]
+        total_kp = Decimal("0")
+        total_kw = Decimal("0")
 
         for r in records:
             data_table.append([str(r.lp), r.data_str(), r.typ, r.numer_dokumentu,
@@ -787,11 +833,10 @@ class RaportKasowy:
             else:
                 total_kw += r.kwota
 
-        saldo = total_kp - total_kw
         data_table += [
-            ["", "", "", "", "RAZEM", "KP:",    _fmt_dec(total_kp)],
-            ["", "", "", "", "",      "KW:",    _fmt_dec(total_kw)],
-            ["", "", "", "", "",      "SALDO:", _fmt_dec(saldo)],
+            ["", "", "", "", "OBROTY", "KP:",    _fmt_dec(total_kp)],
+            ["", "", "", "", "",       "KW:",    _fmt_dec(total_kw)],
+            ["", "", "SK", "Saldo końcowe",   "", "", _fmt_dec(self.saldo_konc)],
         ]
 
         n  = len(data_table)
@@ -813,13 +858,19 @@ class RaportKasowy:
             ("LINEBELOW",   (0, 0),     (-1, 0),     1.5, colors.HexColor("#1a237e")),
             ("FONTNAME",    (0, n-3),   (-1, -1),    _F_BOLD),
             ("ALIGN",       (5, n-3),   (6, -1),     "RIGHT"),
+            ("ALIGN",       (6, n-1),   (6, -1),     "RIGHT"),
             ("LINEABOVE",   (0, n-3),   (-1, n-3),   1, colors.HexColor("#1a237e")),
             ("BACKGROUND",  (0, n-3),   (-1, -1),    colors.HexColor("#e8eaf6")),
+            # Saldo początkowe (wiersz 1) – wyróżnienie
+            ("BACKGROUND",  (0, 1),     (-1, 1),     colors.HexColor("#e8eaf6")),
+            ("FONTNAME",    (0, 1),     (-1, 1),     _F_BOLD),
+            ("LINEBELOW",   (0, 1),     (-1, 1),     0.5, colors.HexColor("#1a237e")),
             *[("BACKGROUND", (0, i), (-1, i), colors.HexColor("#f5f5f5"))
-              for i in range(2, n-3, 2)],
+              for i in range(3, n-3, 2)],
             *[("TEXTCOLOR",  (2, i), (2, i),
                colors.HexColor("#1b5e20") if data_table[i][2] == "KP"
-               else colors.HexColor("#bf360c"))
+               else colors.HexColor("#bf360c") if data_table[i][2] == "KW"
+               else colors.HexColor("#1a237e"))
               for i in range(1, n-3)],
         ])
 
