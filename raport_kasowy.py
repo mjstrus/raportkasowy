@@ -56,98 +56,238 @@ class KasaRecord:
 
 
 # ---------------------------------------------------------------------------
-# Parser JPK_FA
+# Parsery XML: JPK_FA i KSeF (e-faktura)
 # ---------------------------------------------------------------------------
-_JPK_NS = {
-    "tns": "http://crd.gov.pl/wzor/2022/11/29/11089/",
-    "etd": "http://crd.gov.pl/xml/schematy/dziedzinowe/mf/2018/08/24/eD/DefinicjeTypow/",
-}
 
-# Obsługujemy też starszy namespace JPK_FA(3)
-_JPK_NS_V3 = {
-    "tns": "http://jpk.mf.gov.pl/wzor/2022/02/17/02171/",
-    "etd": "http://crd.gov.pl/xml/schematy/dziedzinowe/mf/2018/08/24/eD/DefinicjeTypow/",
-}
+# Regex – słowa kluczowe gotówki w dowolnym polu tekstowym
+_GOTOWKA_RE = re.compile(r"got[oó]wk[ai]|cash|got\.", re.IGNORECASE | re.UNICODE)
 
+# KSeF FormaPlatnosci: 2 = gotówka
+_KSEF_GOTOWKA_CODES = {"2", "gotówka", "gotowka", "cash"}
 
-def _detect_ns(root: ET.Element) -> dict:
-    tag = root.tag
-    if "11089" in tag or "2022/11/29" in tag:
-        return _JPK_NS
-    return _JPK_NS_V3
+# Pola formy płatności w różnych wersjach JPK_FA
+# UWAGA: P_22 to flaga metody kasowej VAT (bool) – NIE forma płatności!
+_FORMA_FIELDS = ["P_19A", "FormaPlatnosci", "SposobPlatnosci", "TerminPlatnosci"]
 
 
-def parse_jpk_fa(xml_path: str | Path) -> list[KasaRecord]:
+def _get_ns_prefix(root: ET.Element) -> tuple[str, dict]:
+    """Wykrywa namespace z tagu głównego elementu."""
+    m = re.match(r"\{([^}]+)\}", root.tag)
+    uri = m.group(1) if m else ""
+    return uri, {"tns": uri} if uri else {}
+
+
+def _element_text_all(elem: ET.Element) -> str:
+    """Złącza cały tekst elementu i jego potomków."""
+    parts = []
+    for node in elem.iter():
+        if node.text:
+            parts.append(node.text)
+        if node.tail:
+            parts.append(node.tail)
+    return " ".join(parts)
+
+
+def _is_gotowka(faktura: ET.Element, ns: dict) -> bool:
     """
-    Wyodrębnia z JPK_FA faktury opłacone gotówką (FP lub FA z formą
-    płatności == 'gotówka'/'gotowka'/'cash').
-    Zwraca listę KasaRecord z typem KP.
+    Wielopoziomowe sprawdzenie formy płatności:
+    1. Szuka w dedykowanych polach formy płatności
+    2. Fallback: skanuje cały tekst elementu faktury
+    """
+    for field in _FORMA_FIELDS:
+        val = (
+            faktura.findtext(f"tns:{field}", namespaces=ns)
+            or faktura.findtext(field)
+            or ""
+        )
+        if val and _GOTOWKA_RE.search(val):
+            return True
+    # Fallback – cały tekst faktury
+    return bool(_GOTOWKA_RE.search(_element_text_all(faktura)))
+
+
+def _extract_faktura_fields(faktura: ET.Element, ns: dict) -> Optional[KasaRecord]:
+    """Wyodrębnia pola wspólne dla JPK_FA i KSeF."""
+    # Data wystawienia
+    data_txt = ""
+    for xpath in ("tns:P_1", "tns:DataWystawienia", "P_1",
+                  "tns:Fa/tns:P_1", ".//tns:P_1"):
+        v = faktura.findtext(xpath, namespaces=ns) or ""
+        if v.strip():
+            data_txt = v.strip()
+            break
+    try:
+        dok_date = datetime.strptime(data_txt[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+    # Numer faktury
+    numer = ""
+    for xpath in ("tns:P_2", "P_2", "tns:Fa/tns:P_2", ".//tns:P_2",
+                  "tns:NrFaktury", ".//tns:NrFaktury"):
+        v = faktura.findtext(xpath, namespaces=ns) or ""
+        if v.strip():
+            numer = v.strip()
+            break
+    numer = numer or "?"
+
+    # Nabywca
+    nabywca = ""
+    for xpath in ("tns:P_3B", "P_3B", "tns:Fa/tns:P_3B", ".//tns:P_3B",
+                  "tns:NabywcaNazwa",
+                  "tns:Podmiot2/tns:DaneIdentyfikacyjne/tns:Nazwa",
+                  ".//tns:Podmiot2//tns:Nazwa"):
+        v = faktura.findtext(xpath, namespaces=ns) or ""
+        if v.strip():
+            nabywca = v.strip()
+            break
+
+    # NIP nabywcy
+    nip = ""
+    for xpath in ("tns:P_3A", "P_3A", "tns:Fa/tns:P_3A", ".//tns:P_3A",
+                  "tns:NabywcaNIP",
+                  "tns:Podmiot2/tns:DaneIdentyfikacyjne/tns:NIP",
+                  ".//tns:Podmiot2//tns:NIP"):
+        v = faktura.findtext(xpath, namespaces=ns) or ""
+        if v.strip():
+            nip = re.sub(r"[^0-9]", "", v.strip())
+            break
+
+    # Kwota należności
+    kwota = Decimal("0")
+    for xpath in ("tns:P_15", "P_15", "tns:Fa/tns:P_15", ".//tns:P_15",
+                  ".//tns:KwotaNaleznosci", ".//tns:WartoscFaktury"):
+        v = (faktura.findtext(xpath, namespaces=ns) or "").replace(",", ".")
+        if v.strip():
+            try:
+                kwota = abs(Decimal(v.strip()))
+                break
+            except Exception:
+                pass
+
+    return KasaRecord(
+        data=dok_date,
+        typ="KP",
+        numer_dokumentu=numer,
+        kontrahent=nabywca,
+        nip=nip,
+        kwota=kwota,
+    )
+
+
+def parse_jpk_fa(
+    xml_path: str | Path,
+    only_cash: bool = True,
+) -> tuple[list[KasaRecord], dict]:
+    """
+    Parsuje JPK_FA (v1-v4). Zwraca (rekordy, diagnostyka).
+    only_cash=True  – tylko faktury gotówkowe
+    only_cash=False – wszystkie faktury
     """
     tree = ET.parse(xml_path)
     root = tree.getroot()
-    ns = _detect_ns(root)
+    uri, ns = _get_ns_prefix(root)
 
     records: list[KasaRecord] = []
+    skipped = 0
 
-    # Każda faktura to element <tns:Faktura>
-    for faktura in root.findall(".//tns:Faktura", ns):
-        # Forma płatności
-        forma = (faktura.findtext("tns:P_22", default="", namespaces=ns) or "").lower()
-        forma += (faktura.findtext("tns:FormaPlatnosci", default="", namespaces=ns) or "").lower()
-        gotowka_keywords = {"gotówka", "gotowka", "cash", "got."}
-        if not any(k in forma for k in gotowka_keywords):
+    faktury = (
+        root.findall(".//tns:Faktura", ns)
+        or root.findall("tns:Faktura", ns)
+        or root.findall("Faktura")
+    )
+
+    for faktura in faktury:
+        if only_cash and not _is_gotowka(faktura, ns):
+            skipped += 1
+            continue
+        rec = _extract_faktura_fields(faktura, ns)
+        if rec:
+            records.append(rec)
+
+    return records, {
+        "total": len(records) + skipped,
+        "cash": len(records),
+        "skipped": skipped,
+        "namespace": uri,
+        "only_cash": only_cash,
+    }
+
+
+def parse_ksef(
+    xml_path: str | Path,
+    only_cash: bool = True,
+) -> tuple[list[KasaRecord], dict]:
+    """
+    Parsuje KSeF (e-faktura FA_VAT XML). Zwraca (rekordy, diagnostyka).
+    FormaPlatnosci=2 oznacza gotówkę.
+    """
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    uri, ns = _get_ns_prefix(root)
+
+    records: list[KasaRecord] = []
+    skipped = 0
+
+    faktury = (
+        root.findall(".//tns:Faktura", ns)
+        or root.findall("tns:Faktura", ns)
+        or ([root] if root.tag.lower().endswith("faktura") else [])
+        or root.findall("Faktura")
+    )
+
+    for faktura in faktury:
+        # KSeF: forma płatności w Fa/Platnosc/FormaPlatnosci
+        forma = ""
+        for xpath in (
+            "tns:Fa/tns:Platnosc/tns:FormaPlatnosci",
+            ".//tns:FormaPlatnosci",
+            ".//FormaPlatnosci",
+        ):
+            v = faktura.findtext(xpath, namespaces=ns) or ""
+            if v.strip():
+                forma = v.strip()
+                break
+
+        is_cash = (forma in _KSEF_GOTOWKA_CODES or _GOTOWKA_RE.search(forma))
+        if only_cash and not is_cash:
+            skipped += 1
             continue
 
-        # Data wystawienia
-        data_txt = (
-            faktura.findtext("tns:P_1", default="", namespaces=ns)
-            or faktura.findtext("tns:DataWystawienia", default="", namespaces=ns)
-        ).strip()
-        try:
-            dok_date = datetime.strptime(data_txt[:10], "%Y-%m-%d").date()
-        except ValueError:
-            continue
+        rec = _extract_faktura_fields(faktura, ns)
+        if rec:
+            records.append(rec)
 
-        numer = (
-            faktura.findtext("tns:P_2", default="", namespaces=ns)
-            or faktura.findtext("tns:NrFaktury", default="", namespaces=ns)
-            or "?"
-        ).strip()
+    return records, {
+        "total": len(records) + skipped,
+        "cash": len(records),
+        "skipped": skipped,
+        "namespace": uri,
+        "only_cash": only_cash,
+    }
 
-        nabywca = (
-            faktura.findtext("tns:P_3B", default="", namespaces=ns)
-            or faktura.findtext("tns:NabywcaNazwa", default="", namespaces=ns)
-            or ""
-        ).strip()
 
-        nip = (
-            faktura.findtext("tns:P_3A", default="", namespaces=ns)
-            or faktura.findtext("tns:NabywcaNIP", default="", namespaces=ns)
-            or ""
-        ).strip()
-        nip = re.sub(r"[^0-9]", "", nip)   # tylko cyfry
+def parse_xml_faktura(
+    xml_path: str | Path,
+    only_cash: bool = True,
+) -> tuple[list[KasaRecord], dict, str]:
+    """
+    Auto-detekcja formatu (JPK_FA vs KSeF) i parsowanie.
+    Zwraca (rekordy, diagnostyka, wykryty_format).
+    """
+    tree = ET.parse(xml_path)
+    root = tree.getroot()
+    tag = root.tag.lower()
 
-        kwota_txt = (
-            faktura.findtext("tns:P_15", default="", namespaces=ns)
-            or faktura.findtext("tns:KwotaNaleznosci", default="", namespaces=ns)
-            or "0"
-        ).replace(",", ".")
+    ksef_hints = ["12648", "wzor/2023", "wzor/2021/11", "wzor/2022/01"]
+    fmt = "ksef" if any(h in tag for h in ksef_hints) else "jpk_fa"
 
-        try:
-            kwota = abs(Decimal(kwota_txt))
-        except Exception:
-            kwota = Decimal("0")
+    if fmt == "ksef":
+        recs, diag = parse_ksef(xml_path, only_cash)
+    else:
+        recs, diag = parse_jpk_fa(xml_path, only_cash)
 
-        records.append(KasaRecord(
-            data=dok_date,
-            typ="KP",
-            numer_dokumentu=numer,
-            kontrahent=nabywca,
-            nip=nip,
-            kwota=kwota,
-        ))
-
-    return records
+    return recs, diag, fmt
 
 
 # ---------------------------------------------------------------------------
