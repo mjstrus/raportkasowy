@@ -31,6 +31,37 @@ from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
+# ── Rejestracja czcionek Unicode (polskie znaki) ─────────────────────────────
+_FONT_DIRS = [
+    "/usr/share/fonts/truetype/dejavu",
+    "/usr/share/fonts/dejavu",
+    "/System/Library/Fonts",          # macOS fallback
+]
+
+def _find_font(filename: str) -> str:
+    for d in _FONT_DIRS:
+        p = Path(d) / filename
+        if p.exists():
+            return str(p)
+    return ""
+
+def _register_fonts():
+    regular = _find_font("DejaVuSans.ttf")
+    bold    = _find_font("DejaVuSans-Bold.ttf")
+    if regular:
+        pdfmetrics.registerFont(TTFont("DejaVu",      regular))
+    if bold:
+        pdfmetrics.registerFont(TTFont("DejaVu-Bold", bold))
+    if regular and bold:
+        pdfmetrics.registerFontFamily("DejaVu", normal="DejaVu", bold="DejaVu-Bold")
+    return bool(regular)
+
+_FONTS_OK = _register_fonts()
+_F        = "DejaVu"       if _FONTS_OK else _F
+_F_BOLD   = "DejaVu-Bold"  if _FONTS_OK else _F_BOLD
 
 DocType = Literal["KP", "KW"]
 
@@ -704,12 +735,12 @@ class RaportKasowy:
         styles      = getSampleStyleSheet()
         title_style = ParagraphStyle(
             "title", parent=styles["Title"],
-            fontName="Helvetica-Bold", fontSize=14,
+            fontName=_F_BOLD, fontSize=14,
             textColor=colors.HexColor("#1a237e"), spaceAfter=4,
         )
         sub_style = ParagraphStyle(
             "sub", parent=styles["Normal"],
-            fontName="Helvetica", fontSize=9,
+            fontName=_F, fontSize=9,
             textColor=colors.gray, spaceAfter=10,
         )
 
@@ -747,7 +778,7 @@ class RaportKasowy:
         ts = TableStyle([
             ("BACKGROUND",  (0, 0),     (-1, 0),     colors.HexColor("#1a237e")),
             ("TEXTCOLOR",   (0, 0),     (-1, 0),     colors.white),
-            ("FONTNAME",    (0, 0),     (-1, 0),     "Helvetica-Bold"),
+            ("FONTNAME",    (0, 0),     (-1, 0),     _F_BOLD),
             ("FONTSIZE",    (0, 0),     (-1, n-4),   8),
             ("VALIGN",      (0, 0),     (-1, -1),    "MIDDLE"),
             ("ALIGN",       (0, 0),     (-1, 0),     "CENTER"),
@@ -759,7 +790,7 @@ class RaportKasowy:
             ("GRID",        (0, 0),     (-1, n-4),   0.3, colors.HexColor("#dddddd")),
             ("LINEABOVE",   (0, 0),     (-1, 0),     1.5, colors.HexColor("#1a237e")),
             ("LINEBELOW",   (0, 0),     (-1, 0),     1.5, colors.HexColor("#1a237e")),
-            ("FONTNAME",    (0, n-3),   (-1, -1),    "Helvetica-Bold"),
+            ("FONTNAME",    (0, n-3),   (-1, -1),    _F_BOLD),
             ("ALIGN",       (5, n-3),   (6, -1),     "RIGHT"),
             ("LINEABOVE",   (0, n-3),   (-1, n-3),   1, colors.HexColor("#1a237e")),
             ("BACKGROUND",  (0, n-3),   (-1, -1),    colors.HexColor("#e8eaf6")),
@@ -783,7 +814,7 @@ class RaportKasowy:
             colWidths=[7*cm, 5*cm, 7*cm],
         )
         sign_table.setStyle(TableStyle([
-            ("FONTNAME",   (0, 0), (-1, -1), "Helvetica"),
+            ("FONTNAME",   (0, 0), (-1, -1), _F),
             ("FONTSIZE",   (0, 0), (-1, -1), 8),
             ("ALIGN",      (0, 0), (-1, -1), "CENTER"),
             ("TOPPADDING", (0, 1), (-1, 1),  14),
