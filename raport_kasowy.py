@@ -36,9 +36,12 @@ from reportlab.pdfbase.ttfonts import TTFont
 
 # ── Rejestracja czcionek Unicode (polskie znaki) ─────────────────────────────
 _FONT_DIRS = [
-    "/usr/share/fonts/truetype/dejavu",
-    "/usr/share/fonts/dejavu",
-    "/System/Library/Fonts",          # macOS fallback
+    Path(__file__).parent / "fonts",               # repo: fonts/ obok raport_kasowy.py
+    Path(__file__).parent.parent / "fonts",        # fallback poziom wyżej
+    Path("/usr/share/fonts/truetype/dejavu"),       # Linux systemowy
+    Path("/usr/share/fonts/dejavu"),
+    Path("/System/Library/Fonts"),                  # macOS
+    Path("C:/Windows/Fonts"),                       # Windows lokalny
 ]
 
 def _find_font(filename: str) -> str:
@@ -50,18 +53,18 @@ def _find_font(filename: str) -> str:
 
 def _register_fonts():
     regular = _find_font("DejaVuSans.ttf")
-    bold    = _find_font("DejaVuSans-Bold.ttf")
-    if regular:
-        pdfmetrics.registerFont(TTFont("DejaVu",      regular))
-    if bold:
-        pdfmetrics.registerFont(TTFont("DejaVu-Bold", bold))
-    if regular and bold:
-        pdfmetrics.registerFontFamily("DejaVu", normal="DejaVu", bold="DejaVu-Bold")
-    return bool(regular)
+    if not regular:
+        return False
+    pdfmetrics.registerFont(TTFont("DejaVu", regular))
+    # Brak Bold? Uzyj tej samej czcionki – polskie znaki wazniejsze niz pogrubienie
+    bold = _find_font("DejaVuSans-Bold.ttf") or regular
+    pdfmetrics.registerFont(TTFont("DejaVu-Bold", bold))
+    pdfmetrics.registerFontFamily("DejaVu", normal="DejaVu", bold="DejaVu-Bold")
+    return True
 
 _FONTS_OK = _register_fonts()
-_F        = "DejaVu"       if _FONTS_OK else _F
-_F_BOLD   = "DejaVu-Bold"  if _FONTS_OK else _F_BOLD
+_F        = "DejaVu"      if _FONTS_OK else "Helvetica"
+_F_BOLD   = "DejaVu-Bold" if _FONTS_OK else "Helvetica-Bold"
 
 DocType = Literal["KP", "KW"]
 
