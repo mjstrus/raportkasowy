@@ -17,6 +17,9 @@ from raport_kasowy import (
     process_payroll,
 )
 
+# Typy wypłat
+TYPY_WYPLAT = ["wynagrodzenie", "dieta"]
+
 # ── Konfiguracja strony ──────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Raport Kasowy | Abacus",
@@ -150,6 +153,11 @@ footer { visibility: hidden; }
 
 # ── Funkcje pomocnicze ───────────────────────────────────────────────────────
 
+def _nip_clean(v: str) -> str:
+    import re
+    return re.sub(r"[^0-9]", "", v or "")
+
+
 def fmt_pln(val: Decimal) -> str:
     s = f"{float(val):,.2f} zł"
     return s.replace(",", " ").replace(".", ",")
@@ -182,7 +190,7 @@ def records_to_df(records):
 if "records" not in st.session_state:
     st.session_state.records = []
 if "payroll_rows" not in st.session_state:
-    st.session_state.payroll_rows = [{"nazwisko": "", "kwota": ""}]
+    st.session_state.payroll_rows = [{"nazwisko": "", "kwota": "", "typ_wyplaty": "wynagrodzenie"}]
 if "raport_okres" not in st.session_state:
     st.session_state.raport_okres = ""
 
@@ -279,7 +287,7 @@ with c4:
 
 
 # ── Krok 3 – Lista płac ──────────────────────────────────────────────────────
-st.markdown('<div class="step-box">👥 Krok 3: Lista płac – wypłaty gotówkowe pracownikom → KW</div>',
+st.markdown('<div class="step-box">👥 Krok 3: Lista płac i diety – wypłaty gotówkowe → KW</div>',
             unsafe_allow_html=True)
 
 with st.expander("➕ Wprowadź listę płac", expanded=False):
@@ -287,34 +295,49 @@ with st.expander("➕ Wprowadź listę płac", expanded=False):
         "Data wypłaty",
         value=date(rok, miesiac, min(28, [31,28,31,30,31,30,31,31,30,31,30,31][miesiac-1])),
     )
-    st.markdown("**Pracownicy i kwoty:**")
+    col_h1, col_h2, col_h3, col_h4 = st.columns([4, 2, 2, 1])
+    with col_h1: st.markdown("**Nazwisko i imię**")
+    with col_h2: st.markdown("**Kwota PLN**")
+    with col_h3: st.markdown("**Typ wypłaty**")
+    st.markdown("")
 
     surviving = []
     for i, row in enumerate(st.session_state.payroll_rows):
-        col_n, col_k, col_d = st.columns([4, 2, 1])
+        col_n, col_k, col_t, col_d = st.columns([4, 2, 2, 1])
         with col_n:
-            naz = st.text_input(f"naz_{i}", value=row["nazwisko"], key=f"naz_{i}",
+            naz = st.text_input(f"naz_{i}", value=row.get("nazwisko",""), key=f"naz_{i}",
                                 label_visibility="collapsed", placeholder=f"Nazwisko i imię #{i+1}")
         with col_k:
-            kwt = st.text_input(f"kwt_{i}", value=row["kwota"], key=f"kwt_{i}",
+            kwt = st.text_input(f"kwt_{i}", value=row.get("kwota",""), key=f"kwt_{i}",
                                 label_visibility="collapsed", placeholder="Kwota PLN")
+        with col_t:
+            typ_w_idx = TYPY_WYPLAT.index(row.get("typ_wyplaty","wynagrodzenie")) if row.get("typ_wyplaty","wynagrodzenie") in TYPY_WYPLAT else 0
+            typ_w = st.selectbox(f"typ_{i}", TYPY_WYPLAT, index=typ_w_idx,
+                                 key=f"typ_{i}", label_visibility="collapsed",
+                                 format_func=lambda x: "💰 Wynagrodzenie" if x == "wynagrodzenie" else "✈️ Dieta")
         with col_d:
             delete = st.button("🗑", key=f"del_{i}", help="Usuń wiersz")
         if not delete or len(st.session_state.payroll_rows) == 1:
-            surviving.append({"nazwisko": naz, "kwota": kwt})
+            surviving.append({"nazwisko": naz, "kwota": kwt, "typ_wyplaty": typ_w})
 
     if len(surviving) != len(st.session_state.payroll_rows):
         st.session_state.payroll_rows = surviving
         st.rerun()
 
     if st.button("➕ Dodaj pracownika"):
-        st.session_state.payroll_rows.append({"nazwisko": "", "kwota": ""})
+        st.session_state.payroll_rows.append({"nazwisko": "", "kwota": "", "typ_wyplaty": "wynagrodzenie"})
         st.rerun()
 
-    total_plac = sum(safe_decimal(r["kwota"]) for r in surviving if r["kwota"])
+    total_plac = sum(safe_decimal(r["kwota"]) for r in surviving if r.get("kwota",""))
     if total_plac > 0:
+        n_wyna = sum(1 for r in surviving if r.get("typ_wyplaty","wynagrodzenie") == "wynagrodzenie" and r.get("kwota","").strip())
+        n_diet = sum(1 for r in surviving if r.get("typ_wyplaty","") == "dieta" and r.get("kwota","").strip())
+        info_parts = []
+        if n_wyna: info_parts.append(f"{n_wyna} wynagrodzeń")
+        if n_diet: info_parts.append(f"{n_diet} diet")
         st.markdown(
-            f'<div class="info-box">💰 Suma listy płac: <strong>{fmt_pln(total_plac)}</strong></div>',
+            f'<div class="info-box">💰 Łącznie: <strong>{fmt_pln(total_plac)}</strong>'
+            f' ({", ".join(info_parts)})</div>',
             unsafe_allow_html=True,
         )
 
@@ -336,22 +359,35 @@ if process:
             with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as tmp:
                 tmp.write(jpk_file.read())
                 tmp_path = tmp.name
-            recs, diag, fmt = parse_xml_faktura(tmp_path, only_cash=only_cash)
-            for r in recs:
-                raport.dodaj_rekord(r)
+            recs, diag, fmt = parse_xml_faktura(tmp_path, only_cash=only_cash, firma_nip=_nip_clean(nip_firmy))
             fmt_label = "KSeF" if fmt == "ksef" else "JPK_FA"
-            if only_cash:
-                msg = (f"✅ {fmt_label}: **{diag['cash']}** faktur gotówkowych "
-                       f"(pominięto {diag['skipped']} innych form płatności)")
-            else:
-                msg = f"✅ {fmt_label}: **{diag['cash']}** faktur (tryb: wszystkie)"
-            summary.append(msg)
-            if only_cash and diag['cash'] == 0 and diag['total'] > 0:
-                st.warning(
-                    f"⚠️ Znaleziono {diag['total']} faktur, ale żadna nie ma "
-                    f"formy płatności 'gotówka'. Wyłącz opcję **Tylko gotówkowe** "
-                    f"w panelu bocznym, aby zaimportować wszystkie faktury."
+
+            # JPK_FA nie zawiera pola FormaPlatnosci (oficjalny schemat MF).
+            # Zakładamy że księgowy wcześniej przefiltrował faktury gotówkowe
+            # w Saldeo – importujemy wszystkie jako KP.
+            if fmt == "jpk_fa" and not diag.get("has_forma_platnosci", True):
+                recs2, diag2, _ = parse_xml_faktura(tmp_path, only_cash=False)
+                for r in recs2:
+                    raport.dodaj_rekord(r)
+                summary.append(
+                    f"✅ {fmt_label}: **{diag2['total']}** faktur → KP "
+                    f"_(JPK_FA bez pola formy płatności – przyjęto wszystkie jako gotówkowe)_"
                 )
+            else:
+                for r in recs:
+                    raport.dodaj_rekord(r)
+                if only_cash:
+                    msg = (f"✅ {fmt_label}: **{diag['cash']}** faktur gotówkowych "
+                           f"(pominięto {diag['skipped']} innych form płatności)")
+                else:
+                    msg = f"✅ {fmt_label}: **{diag['total']}** faktur (tryb: wszystkie)"
+                summary.append(msg)
+                if only_cash and diag['cash'] == 0 and diag['total'] > 0:
+                    st.warning(
+                        f"⚠️ Znaleziono {diag['total']} faktur, ale żadna nie ma "
+                        f"formy płatności 'gotówka'. Wyłącz opcję **Tylko gotówkowe** "
+                        f"w panelu bocznym, aby zaimportować wszystkie faktury."
+                    )
         except Exception as e:
             errors.append(f"Plik XML: {e}")
 
@@ -370,7 +406,7 @@ if process:
 
     # Lista płac
     valid_rows = [r for r in st.session_state.payroll_rows
-                  if r["nazwisko"].strip() and r["kwota"].strip()]
+                  if r.get("nazwisko","").strip() and r.get("kwota","").strip()]
     if valid_rows:
         try:
             recs = process_payroll(valid_rows, pay_date, collective=collective)
@@ -486,7 +522,7 @@ if st.session_state.records:
     with dl3:
         if st.button("🗑️ Wyczyść", use_container_width=True, help="Zacznij od nowa"):
             st.session_state.records = []
-            st.session_state.payroll_rows = [{"nazwisko": "", "kwota": ""}]
+            st.session_state.payroll_rows = [{"nazwisko": "", "kwota": "", "typ_wyplaty": "wynagrodzenie"}]
             st.rerun()
 
     st.markdown("""
